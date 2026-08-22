@@ -28,6 +28,13 @@ typedef enum {
     JammerUiStateCount,
 } JammerUiState;
 
+typedef enum {
+    JammerUiErrorNone,
+    JammerUiErrorExternalNotFound,
+    JammerUiErrorTxFailed,
+    JammerUiErrorCount,
+} JammerUiError;
+
 typedef struct {
     Gui* gui;
     ViewPort* view_port;
@@ -35,11 +42,15 @@ typedef struct {
     uint32_t frequency;
     uint8_t cursor_position;
     bool running;
+    bool tx_requested;
     const SubGhzDevice* device;
     FuriThread* tx_thread;
-    bool tx_running;
+    FuriMutex* ui_mutex;
     JammerMode jamming_mode;
     JammerUiState ui_state;
+    JammerUiError ui_error;
+    FuriHalRegion* saved_region;
+    bool region_overridden;
 } JammerApp;
 
 JammerApp* jammer_app_alloc(void);
