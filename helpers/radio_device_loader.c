@@ -41,19 +41,26 @@ const SubGhzDevice* radio_device_loader_set(
 
     const SubGhzDevice* radio_device = NULL;
 
-    if(radio_device_type == SubGhzRadioDeviceTypeExternalCC1101 &&
-       radio_device_loader_is_connect_external(SUBGHZ_DEVICE_CC1101_EXT_NAME)) {
-        radio_device_loader_power_on();
-        radio_device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_EXT_NAME);
-        if (radio_device) {
-            subghz_devices_begin(radio_device);
-            FURI_LOG_D("radio_device_loader", "External CC1101 initialized.");
+    if(radio_device_type == SubGhzRadioDeviceTypeExternalCC1101) {
+        if(radio_device_loader_is_connect_external(SUBGHZ_DEVICE_CC1101_EXT_NAME)) {
+            radio_device_loader_power_on();
+            radio_device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_EXT_NAME);
+            if(radio_device && subghz_devices_begin(radio_device)) {
+                FURI_LOG_D("radio_device_loader", "External CC1101 initialized.");
+            } else {
+                FURI_LOG_E("radio_device_loader", "Failed to initialize external CC1101.");
+                if(radio_device) {
+                    subghz_devices_end(radio_device);
+                    radio_device = NULL;
+                }
+                radio_device_loader_power_off();
+            }
         } else {
-            FURI_LOG_E("radio_device_loader", "Failed to initialize external CC1101.");
+            FURI_LOG_W("radio_device_loader", "External CC1101 not found.");
         }
-    } else if (current_radio_device == NULL) {
+    } else if(current_radio_device == NULL) {
         radio_device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
-        if (radio_device) {
+        if(radio_device) {
             FURI_LOG_D("radio_device_loader", "Internal CC1101 selected.");
         } else {
             FURI_LOG_E("radio_device_loader", "Failed to load internal CC1101.");
