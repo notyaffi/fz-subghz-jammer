@@ -1,4 +1,4 @@
-# RF Jammer App by RocketGod ☠️📡
+# Flipper Zero SubGHz Jammer App ☠️
 
 This **SubGHz Jammer** for the Flipper Zero is a powerful tool for jamming across multiple radio frequencies and modulation schemes.
 
