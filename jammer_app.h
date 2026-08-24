@@ -31,7 +31,15 @@ typedef enum {
 typedef enum {
     JammerUiErrorNone,
     JammerUiErrorExternalNotFound,
-    JammerUiErrorTxFailed,
+    JammerUiErrorExternalBeginFailed,
+    JammerUiErrorThreadAllocFailed,
+    JammerUiErrorTuneBlocked,
+    JammerUiErrorSetTxFailed,
+    JammerUiErrorAsyncStartFailed,
+    JammerUiErrorPacketStartTimeout,
+    JammerUiErrorPacketEndTimeout,
+    JammerUiErrorInvalidPreset,
+    JammerUiErrorTxWaitFailed,
     JammerUiErrorCount,
 } JammerUiError;
 
@@ -49,6 +57,7 @@ typedef struct {
     JammerMode jamming_mode;
     JammerUiState ui_state;
     JammerUiError ui_error;
+    uint32_t tx_started_tick;
     FuriHalRegion* saved_region;
     bool region_overridden;
 } JammerApp;
