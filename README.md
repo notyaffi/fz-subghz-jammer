@@ -81,55 +81,15 @@ Each jamming mode is implemented as a distinct modulation scheme and data patter
 - **Mechanism**: Square waves are simple digital pulses that are straightforward to generate and disruptive across various digital communication schemes.
 - **Impact**: Mimics basic digital signals, likely interfering with devices expecting digital pulse sequences like on-off signaling, potentially causing dropouts or erratic behavior.
 
-### 📈 **Sawtooth Wave**:
-- **Pattern**: A gradually increasing signal followed by a sharp drop, repeated continuously.
-- **Mechanism**: The sawtooth pattern is similar to frequency sweeps used in testing, creating a continuously shifting interference.
-- **Impact**: Effective against frequency-sensitive systems by introducing an unpredictable, ramped noise, often disrupting RF links that lack sufficient error correction.
-
 ### 🎲 **White Noise**:
 - **Pattern**: Randomized data across the signal spectrum.
 - **Mechanism**: Emulates white noise, a common form of interference that introduces random amplitude values.
 - **Impact**: White noise can disrupt any frequency-based device, particularly analog devices, making it a universal jamming signal for both digital and analog targets.
 
-### 🔺 **Triangle Wave**:
-- **Pattern**: Oscillates linearly between high and low values in a symmetric pattern.
-- **Mechanism**: The triangular waveform introduces a consistent frequency shift, resembling certain synthetic modulations.
-- **Impact**: Affects devices relying on predictable frequency patterns, making it harder for them to differentiate between legitimate and jammed signals.
-
-### 📡 **Chirp Signal**:
-- **Pattern**: Frequency increases steadily within the waveform, known as a "chirp."
-- **Mechanism**: Common in radar and sonar, chirp signals create a rising frequency pattern over time.
-- **Impact**: Causes RF receivers to detect multiple frequencies simultaneously, often confusing or overloading their demodulators.
-
-### 🎲 **Gaussian Noise**:
-- **Pattern**: Random values with a Gaussian (bell-curve) distribution.
-- **Mechanism**: Gaussian noise introduces random, statistically distributed values that mimic natural noise in RF environments.
-- **Impact**: Particularly effective for jamming digital signals relying on Gaussian-based frequency modulation, as it closely resembles natural interference, making the jamming less detectable.
-
 ### 💥 **Burst Mode**:
 - **Pattern**: Periodic bursts of high (`0xFF`) data with pauses in between.
 - **Mechanism**: Sends intense pulses followed by intervals, creating an effect similar to packetized data.
 - **Impact**: Effective against burst-based communication systems by mimicking valid data bursts, which can confuse or overload the receiver's data handling.
-
----
-
-## 🎥 Internal CC1101 Demonstration
-https://github.com/user-attachments/assets/4a34bc73-d419-480e-bb87-90216eb8a1e0
-## 🎥 External CC1101 Demonstration
-https://github.com/user-attachments/assets/1053ec27-a15f-4313-9257-2360135c5e96
-## 🎥 Modulation Modes
-https://github.com/user-attachments/assets/77970e50-d46f-4d59-bbb0-6e2624a98127
-
-## 🧪 Car Fob in Controlled Lab Test (-28dBm)
-![car_fob](https://github.com/user-attachments/assets/35cdb9c7-fcbe-4fdf-a10e-9e020a504f6f)
-## 🧪 Community .sub files in Controlled Lab Test (-8dBm narrow)
-![jammer_sub_files](https://github.com/user-attachments/assets/a2ad93ae-4e08-4af8-97cc-5ec85f9759a4)
-## 🧪 RF Jammer App and Internal CC1101/Antenna in Controlled Lab Test (-8dBm wide)
-![rocketgod_jammer_app](https://github.com/user-attachments/assets/6ed6bb9b-2379-491c-9a69-845695de2542)
-## 🧪 RF Jammer App and External CC1101/Antenna Flux Capacitor by Rabbit Labs (10dBm) [TinySA Ultra hard wired w/25W attenuator]
-![External_Flux-Capacitor_Rabbit-Labs](https://github.com/user-attachments/assets/63e7a4d8-1584-425b-8113-9495a6041836)
-
-https://github.com/user-attachments/assets/53a3123e-b749-4af6-b542-e1784b131084
 
 ---
 
