@@ -40,7 +40,9 @@ typedef struct {
 typedef enum {
     JammerPacketResultSent,
     JammerPacketResultStopped,
-    JammerPacketResultError,
+    JammerPacketResultSetTxFailed,
+    JammerPacketResultStartTimeout,
+    JammerPacketResultCompletionTimeout,
 } JammerPacketResult;
 
 static const FrequencyBand valid_frequency_bands[] = {
@@ -73,15 +75,23 @@ static const char* jammer_ui_states[] = {
 
 static const char* jammer_ui_errors[] = {
     "",
-    "EXT CC1101 NOT FOUND",
-    "TX FAILED",
+    "EXT NOT FOUND",
+    "EXT BEGIN FAILED",
+    "THREAD ALLOC FAILED",
+    "TUNE BLOCKED",
+    "SET TX FAILED",
+    "ASYNC START FAILED",
+    "PACKET START TIMEOUT",
+    "PACKET END TIMEOUT",
+    "INVALID PRESET",
+    "TX WAIT FAILED",
 };
 
 _Static_assert(COUNT_OF(jamming_modes) == JammerModeCount, "Jammer mode labels mismatch");
 _Static_assert(COUNT_OF(jammer_ui_states) == JammerUiStateCount, "Jammer state labels mismatch");
 _Static_assert(COUNT_OF(jammer_ui_errors) == JammerUiErrorCount, "Jammer error labels mismatch");
 
-static bool jammer_init_subghz(JammerApp* app);
+static JammerUiError jammer_init_subghz(JammerApp* app);
 static void jammer_start_tx(JammerApp* app);
 static void jammer_stop_tx(JammerApp* app);
 static void jammer_toggle_tx(JammerApp* app);
@@ -90,6 +100,7 @@ static bool jammer_load_preset(JammerApp* app, JammerMode mode);
 static void jammer_update_view(JammerApp* app);
 static void jammer_set_ui_state(JammerApp* app, JammerUiState state);
 static JammerUiState jammer_get_ui_state(JammerApp* app);
+static bool jammer_get_tx_elapsed_seconds(JammerApp* app, uint32_t* elapsed_seconds);
 static void jammer_set_ui_error(JammerApp* app, JammerUiError error);
 static void jammer_clear_ui_error(JammerApp* app);
 static bool jammer_override_region(JammerApp* app);
@@ -117,8 +128,9 @@ int32_t jammer_app(void* p) {
     }
 
     jammer_set_ui_state(app, JammerUiStateStarting);
-    if(!jammer_init_subghz(app)) {
-        jammer_set_ui_error(app, JammerUiErrorExternalNotFound);
+    const JammerUiError init_error = jammer_init_subghz(app);
+    if(init_error != JammerUiErrorNone) {
+        jammer_set_ui_error(app, init_error);
     } else {
         app->tx_requested = true;
         jammer_clear_ui_error(app);
@@ -128,6 +140,12 @@ int32_t jammer_app(void* p) {
     FURI_LOG_I(TAG, "Entering main loop");
 
     InputEvent event;
+    const uint32_t timer_tick_frequency = furi_kernel_get_tick_frequency();
+    uint32_t timer_poll_interval = timer_tick_frequency / 4U;
+    if(timer_poll_interval == 0) timer_poll_interval = 1;
+    uint32_t last_timer_poll_tick = furi_get_tick();
+    uint32_t last_tx_elapsed_seconds = UINT32_MAX;
+
     while(app->running) {
         if(furi_message_queue_get(app->event_queue, &event, 10) == FuriStatusOk) {
             if(event.type == InputTypeLong && event.key == InputKeyOk) {
@@ -179,6 +197,24 @@ int32_t jammer_app(void* p) {
                 }
             }
         }
+
+        const uint32_t current_tick = furi_get_tick();
+        if((current_tick - last_timer_poll_tick) >= timer_poll_interval) {
+            last_timer_poll_tick = current_tick;
+
+            uint32_t tx_elapsed_seconds;
+            if(jammer_get_tx_elapsed_seconds(app, &tx_elapsed_seconds)) {
+                if(last_tx_elapsed_seconds == UINT32_MAX ||
+                   tx_elapsed_seconds < last_tx_elapsed_seconds) {
+                    last_tx_elapsed_seconds = tx_elapsed_seconds;
+                } else if(tx_elapsed_seconds != last_tx_elapsed_seconds) {
+                    last_tx_elapsed_seconds = tx_elapsed_seconds;
+                    jammer_update_view(app);
+                }
+            } else {
+                last_tx_elapsed_seconds = UINT32_MAX;
+            }
+        }
     }
 
     FURI_LOG_I(TAG, "Exiting JammerApp main loop");
@@ -203,6 +239,7 @@ JammerApp* jammer_app_alloc(void) {
     app->jamming_mode = JammerModeOok650Async;
     app->ui_state = JammerUiStateIdle;
     app->ui_error = JammerUiErrorNone;
+    app->tx_started_tick = 0;
 
     if(!jammer_override_region(app)) {
         free(app);
@@ -313,15 +350,21 @@ void jammer_app_free(JammerApp* app) {
 #endif
 }
 
-static bool jammer_init_subghz(JammerApp* app) {
+static JammerUiError jammer_init_subghz(JammerApp* app) {
 #ifdef FURI_DEBUG
     FURI_LOG_D(TAG, "Enter jammer_init_subghz");
 #endif
-    app->device = radio_device_loader_set();
+    RadioDeviceLoaderStatus loader_status;
+    app->device = radio_device_loader_set(&loader_status);
 
     if(!app->device) {
+        if(loader_status == RadioDeviceLoaderStatusBeginFailed) {
+            FURI_LOG_E(TAG, "External CC1101 was found but initialization failed.");
+            return JammerUiErrorExternalBeginFailed;
+        }
+
         FURI_LOG_E(TAG, "External CC1101 is required but was not found.");
-        return false;
+        return JammerUiErrorExternalNotFound;
     }
 
     subghz_devices_reset(app->device);
@@ -334,12 +377,12 @@ static bool jammer_init_subghz(JammerApp* app) {
     furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
 
     if(!jammer_load_preset(app, mode)) {
-        return false;
+        return JammerUiErrorInvalidPreset;
     }
 #ifdef FURI_DEBUG
     FURI_LOG_D(TAG, "Exit jammer_init_subghz");
 #endif
-    return true;
+    return JammerUiErrorNone;
 }
 
 static void jammer_draw_callback(Canvas* canvas, void* context) {
@@ -349,6 +392,7 @@ static void jammer_draw_callback(Canvas* canvas, void* context) {
     JammerMode mode;
     JammerUiState state;
     JammerUiError error;
+    uint32_t tx_started_tick;
 
     furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
     frequency = app->frequency;
@@ -356,12 +400,41 @@ static void jammer_draw_callback(Canvas* canvas, void* context) {
     mode = app->jamming_mode;
     state = app->ui_state;
     error = app->ui_error;
+    tx_started_tick = app->tx_started_tick;
     furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
 
     canvas_clear(canvas);
 
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str_aligned(canvas, 126, 1, AlignRight, AlignTop, jammer_ui_states[state]);
+
+    if(state == JammerUiStateTransmitting) {
+        const uint32_t elapsed_seconds =
+            (furi_get_tick() - tx_started_tick) / furi_kernel_get_tick_frequency();
+        const uint32_t elapsed_hours = elapsed_seconds / 3600U;
+        const uint32_t elapsed_minutes = (elapsed_seconds % 3600U) / 60U;
+        const uint32_t elapsed_remaining_seconds = elapsed_seconds % 60U;
+        char timer_str[20];
+
+        if(elapsed_hours > 0) {
+            snprintf(
+                timer_str,
+                sizeof(timer_str),
+                "%lu:%02lu:%02lu",
+                elapsed_hours,
+                elapsed_minutes,
+                elapsed_remaining_seconds);
+        } else {
+            snprintf(
+                timer_str,
+                sizeof(timer_str),
+                "%02lu:%02lu",
+                elapsed_minutes,
+                elapsed_remaining_seconds);
+        }
+
+        canvas_draw_str_aligned(canvas, 2, 1, AlignLeft, AlignTop, timer_str);
+    }
 
     char freq_str[20];
     snprintf(
@@ -500,7 +573,7 @@ static void jammer_switch_mode(JammerApp* app) {
     subghz_devices_idle(app->device);
 
     if(!jammer_load_preset(app, mode)) {
-        jammer_set_ui_error(app, JammerUiErrorTxFailed);
+        jammer_set_ui_error(app, JammerUiErrorInvalidPreset);
         return;
     }
 
@@ -557,10 +630,13 @@ static void jammer_toggle_tx(JammerApp* app) {
             jammer_stop_tx(app);
         }
 
-        if(!app->device && !jammer_init_subghz(app)) {
-            app->tx_requested = false;
-            jammer_set_ui_error(app, JammerUiErrorExternalNotFound);
-            return;
+        if(!app->device) {
+            const JammerUiError init_error = jammer_init_subghz(app);
+            if(init_error != JammerUiErrorNone) {
+                app->tx_requested = false;
+                jammer_set_ui_error(app, init_error);
+                return;
+            }
         }
 
         app->tx_requested = true;
@@ -576,9 +652,12 @@ static void jammer_toggle_tx(JammerApp* app) {
         return;
     }
 
-    if(!app->device && !jammer_init_subghz(app)) {
-        jammer_set_ui_error(app, JammerUiErrorExternalNotFound);
-        return;
+    if(!app->device) {
+        const JammerUiError init_error = jammer_init_subghz(app);
+        if(init_error != JammerUiErrorNone) {
+            jammer_set_ui_error(app, init_error);
+            return;
+        }
     }
 
     app->tx_requested = true;
@@ -604,7 +683,7 @@ static void jammer_start_tx(JammerApp* app) {
     app->tx_thread = furi_thread_alloc();
     if(!app->tx_thread) {
         FURI_LOG_E(TAG, "Failed to allocate jammer TX thread");
-        jammer_set_ui_error(app, JammerUiErrorTxFailed);
+        jammer_set_ui_error(app, JammerUiErrorThreadAllocFailed);
         return;
     }
 
@@ -678,7 +757,7 @@ static JammerPacketResult
     subghz_devices_write_packet(app->device, data, size);
 
     if(!subghz_devices_set_tx(app->device)) {
-        return JammerPacketResultError;
+        return JammerPacketResultSetTxFailed;
     }
 
     uint16_t timeout = JAMMER_PACKET_TIMEOUT_TICKS;
@@ -693,7 +772,7 @@ static JammerPacketResult
     if(timeout == 0) {
         FURI_LOG_W(TAG, "Packet TX start timeout");
         subghz_devices_idle(app->device);
-        return JammerPacketResultError;
+        return JammerPacketResultStartTimeout;
     }
 
     timeout = JAMMER_PACKET_TIMEOUT_TICKS;
@@ -709,7 +788,7 @@ static JammerPacketResult
     subghz_devices_idle(app->device);
     if(timeout == 0) {
         FURI_LOG_W(TAG, "Packet TX completion timeout");
-        return JammerPacketResultError;
+        return JammerPacketResultCompletionTimeout;
     }
 
     return JammerPacketResultSent;
@@ -718,7 +797,7 @@ static JammerPacketResult
 static int32_t jammer_tx_thread(void* context) {
     JammerApp* app = context;
     uint8_t jam_data[MESSAGE_MAX_LEN];
-    bool tx_ok = true;
+    JammerUiError tx_error = JammerUiErrorNone;
 
     furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
     const JammerMode mode = app->jamming_mode;
@@ -759,18 +838,25 @@ static int32_t jammer_tx_thread(void* context) {
             }
             break;
         default:
-            tx_ok = false;
+            tx_error = JammerUiErrorInvalidPreset;
             break;
     }
 
-    if(tx_ok) {
+    if(tx_error == JammerUiErrorNone) {
+        if(subghz_devices_check_tx(app->device, frequency) != SubGhzTxAllowed) {
+            tx_error = JammerUiErrorTuneBlocked;
+            FURI_LOG_E(TAG, "TX is blocked at %lu Hz", frequency);
+        }
+    }
+
+    if(tx_error == JammerUiErrorNone) {
         const uint32_t actual_frequency = subghz_devices_set_frequency(app->device, frequency);
         FURI_LOG_I(TAG, "Radio tuned to %lu Hz", actual_frequency);
     }
 
     const bool stop_before_tx = jammer_tx_stop_requested();
 
-    if(tx_ok && !stop_before_tx &&
+    if(tx_error == JammerUiErrorNone && !stop_before_tx &&
        (mode == JammerModeOok650Async || mode == JammerModeBruteforce)) {
         const GpioPin* data_gpio = subghz_devices_get_data_gpio(app->device);
         furi_hal_gpio_write(data_gpio, true);
@@ -781,18 +867,18 @@ static int32_t jammer_tx_thread(void* context) {
             if(!jammer_tx_stop_requested()) {
                 jammer_set_ui_state(app, JammerUiStateTransmitting);
                 if(!jammer_tx_wait_for_stop(FuriWaitForever)) {
-                    tx_ok = false;
+                    tx_error = JammerUiErrorTxWaitFailed;
                 }
             }
             subghz_devices_idle(app->device);
         } else {
-            tx_ok = false;
+            tx_error = JammerUiErrorSetTxFailed;
         }
 
         furi_hal_gpio_write(data_gpio, false);
         furi_hal_gpio_init(data_gpio, GpioModeAnalog, GpioPullNo, GpioSpeedLow);
     } else if(
-        tx_ok && !stop_before_tx &&
+        tx_error == JammerUiErrorNone && !stop_before_tx &&
         (mode == JammerMode2FSKDev238Async || mode == JammerMode2FSKDev476Async ||
          mode == JammerModeSquareWave || mode == JammerModeWhiteNoise ||
          mode == JammerModeBurst)) {
@@ -811,15 +897,15 @@ static int32_t jammer_tx_thread(void* context) {
             if(!jammer_tx_stop_requested()) {
                 jammer_set_ui_state(app, JammerUiStateTransmitting);
                 if(!jammer_tx_wait_for_stop(FuriWaitForever)) {
-                    tx_ok = false;
+                    tx_error = JammerUiErrorTxWaitFailed;
                 }
             }
             subghz_devices_stop_async_tx(app->device);
         } else {
-            tx_ok = false;
+            tx_error = JammerUiErrorAsyncStartFailed;
         }
     } else if(
-        tx_ok && !stop_before_tx &&
+        tx_error == JammerUiErrorNone && !stop_before_tx &&
         (mode == JammerModeMSK99_97KbAsync || mode == JammerModeGFSK9_99KbAsync)) {
         const GpioPin* data_gpio = subghz_devices_get_data_gpio(app->device);
         furi_hal_gpio_init(data_gpio, GpioModeInput, GpioPullNo, GpioSpeedLow);
@@ -837,8 +923,14 @@ static int32_t jammer_tx_thread(void* context) {
                 jammer_send_packet(app, packet, (uint8_t)sizeof(packet));
             if(packet_result == JammerPacketResultStopped) {
                 break;
-            } else if(packet_result == JammerPacketResultError) {
-                tx_ok = false;
+            } else if(packet_result == JammerPacketResultSetTxFailed) {
+                tx_error = JammerUiErrorSetTxFailed;
+                break;
+            } else if(packet_result == JammerPacketResultStartTimeout) {
+                tx_error = JammerUiErrorPacketStartTimeout;
+                break;
+            } else if(packet_result == JammerPacketResultCompletionTimeout) {
+                tx_error = JammerUiErrorPacketEndTimeout;
                 break;
             }
 
@@ -854,9 +946,9 @@ static int32_t jammer_tx_thread(void* context) {
         furi_hal_gpio_init(data_gpio, GpioModeAnalog, GpioPullNo, GpioSpeedLow);
     }
 
-    if(!tx_ok) {
-        jammer_set_ui_error(app, JammerUiErrorTxFailed);
-        FURI_LOG_E(TAG, "TX worker failed in mode %d", mode);
+    if(tx_error != JammerUiErrorNone) {
+        jammer_set_ui_error(app, tx_error);
+        FURI_LOG_E(TAG, "TX worker failed in mode %d with error %d", mode, tx_error);
     }
 
     FURI_LOG_I(TAG, "TX Thread exiting");
@@ -869,6 +961,9 @@ static void jammer_update_view(JammerApp* app) {
 
 static void jammer_set_ui_state(JammerApp* app, JammerUiState state) {
     furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    if(state == JammerUiStateTransmitting && app->ui_state != JammerUiStateTransmitting) {
+        app->tx_started_tick = furi_get_tick();
+    }
     app->ui_state = state;
     furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
     jammer_update_view(app);
@@ -879,6 +974,21 @@ static JammerUiState jammer_get_ui_state(JammerApp* app) {
     const JammerUiState state = app->ui_state;
     furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
     return state;
+}
+
+static bool jammer_get_tx_elapsed_seconds(JammerApp* app, uint32_t* elapsed_seconds) {
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    const bool is_transmitting = app->ui_state == JammerUiStateTransmitting;
+    const uint32_t tx_started_tick = app->tx_started_tick;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+
+    if(!is_transmitting) {
+        return false;
+    }
+
+    *elapsed_seconds =
+        (furi_get_tick() - tx_started_tick) / furi_kernel_get_tick_frequency();
+    return true;
 }
 
 static void jammer_set_ui_error(JammerApp* app, JammerUiError error) {
