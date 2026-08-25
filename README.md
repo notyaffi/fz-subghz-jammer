@@ -1,6 +1,6 @@
 # Flipper Zero SubGHz Jammer App ☠️
 
-[![Status](https://img.shields.io/badge/status-stable-brightgreen)]
+![Status](https://img.shields.io/badge/status-stable-brightgreen)
 [![Version](https://img.shields.io/github/v/release/notyaffi/fz-subghz-jammer?display_name=release&label=version)](https://github.io/v/release/notyaffi/fz-subghz-jammer)
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
 
