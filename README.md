@@ -72,11 +72,6 @@ Each jamming mode is implemented as a distinct modulation scheme and data patter
 - **Mechanism**: This mode sends a constant, unmodulated signal of `1`s. In the digital domain, `0xFF` means every bit is a `1`, resulting in a strong, uninterrupted carrier wave being transmitted.
 - **Impact**: The **Bruteforce 0xFF** mode creates the most aggressive form of jamming. By transmitting non-stop high bits, it forces constant noise across the frequency, which jams nearly any communication within the affected band. Most RF systems rely on alternating data bits (`1`s and `0`s), so flooding the airwaves with pure `1`s causes receivers to lock up, unable to process real signals.
 
-### 🎶 **Sine Wave**:
-- **Pattern**: Generates a continuous sine wave signal across the frequency.
-- **Mechanism**: Sine waves represent the most basic continuous wave (CW) modulation, commonly used in signal testing.
-- **Impact**: Affects devices using analog modulation schemes, causing them to interpret the signal as a valid, albeit meaningless, transmission, effectively drowning out real signals.
-
 ### 🟥 **Square Wave**:
 - **Pattern**: Alternates between high (`0xFF`) and low (`0x00`) states.
 - **Mechanism**: Square waves are simple digital pulses that are straightforward to generate and disruptive across various digital communication schemes.
