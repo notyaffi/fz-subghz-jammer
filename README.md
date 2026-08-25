@@ -1,5 +1,8 @@
 # Flipper Zero SubGHz Jammer App ☠️
 
+![Platform](https://img.shields.io/badge/platform-Flipper_Zero-orange)
+![Firmware](https://img.shields.io/badge/firmware-Momentum_|_Unleashed_|_RogueMaster-purple)
+![Hardware](https://img.shields.io/badge/hardware-CC1101-yellow)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 [![Version](https://img.shields.io/github/v/release/notyaffi/fz-subghz-jammer?display_name=release&label=version)](https://github.io/v/release/notyaffi/fz-subghz-jammer)
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
