@@ -1,5 +1,7 @@
 # Flipper Zero SubGHz Jammer App ☠️
 
+[![Version](https://img.shields.io/github/v/release/notyaffi/fz-subghz-jammer?display_name=release&label=version)](https://github.io/v/release/notyaffi/fz-subghz-jammer)
+
 This **SubGHz Jammer** for the Flipper Zero is a powerful tool for jamming across multiple radio frequencies and modulation schemes.
 
 **Requires an external CC1101 compatible with the `cc1101_ext` driver**
