@@ -11,7 +11,8 @@
 
 This **SubGHz Jammer** for the Flipper Zero is a powerful tool for jamming across multiple radio frequencies and modulation schemes.
 
-**Requires any external CC1101 compatible with the `cc1101_ext` driver**
+## Requires any external CC1101
+Most of them are compatible with the `cc1101_ext` driver
 
 _Attach external CC1101 to the GPIO **before** starting the app_
 
