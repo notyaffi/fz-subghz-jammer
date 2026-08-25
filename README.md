@@ -2,8 +2,23 @@
 
 This **SubGHz Jammer** for the Flipper Zero is a powerful tool for jamming across multiple radio frequencies and modulation schemes.
 
-## 📡 External CC1101 Notes
-- **To use an external CC1101, attach it to the GPIO before starting the app.**
+**Requires an external CC1101 compatible with the `cc1101_ext` driver**
+_To use an external CC1101, attach it to the GPIO before starting the app_
+
+## ⤷ Compatibility ˎˊ˗
+- Designed for Momentum Firmware.
+- The internal Flipper Zero Sub-GHz radio is not supported due to possible damage.
+
+---
+
+## 💣 Controls
+- **← / →**: Modify the currently selected digit in the frequency.
+- **↑ / ↓**: Move between digits to adjust frequency values.
+- **OK**: Switch jamming modes in real-time.
+- **Hold OK** — Pause, start, or retry TX.
+- **Back Button**: Stop the jamming and exit the app.
+
+---
 
 ## 📡 Frequency Control
 The app supports multiple frequency bands, ensuring compliance with the ranges handled by the Flipper's sub-GHz radio:
@@ -11,26 +26,9 @@ The app supports multiple frequency bands, ensuring compliance with the ranges h
 - **Band 2**: 387 MHz – 464 MHz
 - **Band 3**: 779 MHz – 928 MHz
 
-You can adjust frequencies with **precision**:
-- **Left/Right** arrows move between digits to adjust.
-- **Up/Down** arrows increase or decrease the selected digit.
-
 The app will automatically correct the frequency if it's outside the valid range for the selected band.
 
 ---
-
-## 💣 Controls
-- **Up/Down Buttons**: Modify the currently selected digit in the frequency.
-- **Left/Right Buttons**: Move between digits to adjust frequency values.
-- **OK Button**: Switch jamming modes in real-time.
-- **Back Button**: Stop the jamming and exit the app.
-
----
-
-## ⤷ Compatibility ˎˊ˗
-- Designed for Momentum Firmware.
-- Requires an external CC1101 compatible with the `cc1101_ext` driver.
-- The internal Flipper Zero Sub-GHz radio is not supported due to possible damage.
 
 ## ⤷ Notes ˎˊ˗
 - Transmission starts automatically when the application is opened.
