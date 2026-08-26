@@ -3,6 +3,10 @@
 #include <applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h>
 #include <lib/subghz/devices/cc1101_int/cc1101_int_interconnect.h>
 
+static bool radio_device_loader_otg_was_enabled = false;
+static bool radio_device_loader_otg_enabled_by_app = false;
+static bool radio_device_loader_external_active = false;
+
 static void radio_device_loader_power_on() {
     uint8_t attempts = 0;
     while(!furi_hal_power_is_otg_enabled() && attempts++ < 5) {
@@ -14,6 +18,15 @@ static void radio_device_loader_power_on() {
 
 static void radio_device_loader_power_off() {
     if(furi_hal_power_is_otg_enabled()) furi_hal_power_disable_otg();
+}
+
+static void radio_device_loader_release_owned_otg() {
+    if(radio_device_loader_otg_enabled_by_app) {
+        radio_device_loader_power_off();
+    }
+
+    radio_device_loader_otg_was_enabled = false;
+    radio_device_loader_otg_enabled_by_app = false;
 }
 
 static bool radio_device_loader_is_connect_external(void) {
@@ -37,14 +50,20 @@ static bool radio_device_loader_is_connect_external(void) {
 
 const SubGhzDevice* radio_device_loader_set_external(RadioDeviceLoaderStatus* status) {
     furi_assert(status);
+    furi_assert(!radio_device_loader_external_active);
+    furi_assert(!radio_device_loader_otg_enabled_by_app);
 
     const SubGhzDevice* radio_device = NULL;
     *status = RadioDeviceLoaderStatusExternalNotFound;
+    radio_device_loader_otg_was_enabled = furi_hal_power_is_otg_enabled();
 
     if(radio_device_loader_is_connect_external()) {
         radio_device_loader_power_on();
+        radio_device_loader_otg_enabled_by_app =
+            !radio_device_loader_otg_was_enabled && furi_hal_power_is_otg_enabled();
         radio_device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_EXT_NAME);
         if(radio_device && subghz_devices_begin(radio_device)) {
+            radio_device_loader_external_active = true;
             *status = RadioDeviceLoaderStatusOk;
             FURI_LOG_D("radio_device_loader", "External CC1101 initialized.");
         } else {
@@ -54,9 +73,10 @@ const SubGhzDevice* radio_device_loader_set_external(RadioDeviceLoaderStatus* st
                 subghz_devices_end(radio_device);
                 radio_device = NULL;
             }
-            radio_device_loader_power_off();
+            radio_device_loader_release_owned_otg();
         }
     } else {
+        radio_device_loader_otg_was_enabled = false;
         FURI_LOG_W("radio_device_loader", "External CC1101 not found.");
     }
 
@@ -81,6 +101,9 @@ const SubGhzDevice* radio_device_loader_set_internal(RadioDeviceLoaderStatus* st
 
 void radio_device_loader_end_external(const SubGhzDevice* radio_device) {
     furi_assert(radio_device);
-    radio_device_loader_power_off();
+    furi_assert(radio_device_loader_external_active);
+
+    radio_device_loader_release_owned_otg();
     subghz_devices_end(radio_device);
+    radio_device_loader_external_active = false;
 }
