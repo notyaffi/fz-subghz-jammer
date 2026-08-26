@@ -1,6 +1,7 @@
 #include "radio_device_loader.h"
 
 #include <applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h>
+#include <lib/subghz/devices/cc1101_int/cc1101_int_interconnect.h>
 
 static void radio_device_loader_power_on() {
     uint8_t attempts = 0;
@@ -34,11 +35,11 @@ static bool radio_device_loader_is_connect_external(void) {
     return is_connect;
 }
 
-const SubGhzDevice* radio_device_loader_set(RadioDeviceLoaderStatus* status) {
+const SubGhzDevice* radio_device_loader_set_external(RadioDeviceLoaderStatus* status) {
     furi_assert(status);
 
     const SubGhzDevice* radio_device = NULL;
-    *status = RadioDeviceLoaderStatusNotFound;
+    *status = RadioDeviceLoaderStatusExternalNotFound;
 
     if(radio_device_loader_is_connect_external()) {
         radio_device_loader_power_on();
@@ -47,7 +48,7 @@ const SubGhzDevice* radio_device_loader_set(RadioDeviceLoaderStatus* status) {
             *status = RadioDeviceLoaderStatusOk;
             FURI_LOG_D("radio_device_loader", "External CC1101 initialized.");
         } else {
-            *status = RadioDeviceLoaderStatusBeginFailed;
+            *status = RadioDeviceLoaderStatusExternalBeginFailed;
             FURI_LOG_E("radio_device_loader", "Failed to initialize external CC1101.");
             if(radio_device) {
                 subghz_devices_end(radio_device);
@@ -62,7 +63,23 @@ const SubGhzDevice* radio_device_loader_set(RadioDeviceLoaderStatus* status) {
     return radio_device;
 }
 
-void radio_device_loader_end(const SubGhzDevice* radio_device) {
+const SubGhzDevice* radio_device_loader_set_internal(RadioDeviceLoaderStatus* status) {
+    furi_assert(status);
+
+    const SubGhzDevice* radio_device =
+        subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
+    if(radio_device) {
+        *status = RadioDeviceLoaderStatusOk;
+        FURI_LOG_D("radio_device_loader", "Internal CC1101 selected.");
+    } else {
+        *status = RadioDeviceLoaderStatusInternalNotFound;
+        FURI_LOG_E("radio_device_loader", "Internal CC1101 not found.");
+    }
+
+    return radio_device;
+}
+
+void radio_device_loader_end_external(const SubGhzDevice* radio_device) {
     furi_assert(radio_device);
     radio_device_loader_power_off();
     subghz_devices_end(radio_device);
