@@ -77,6 +77,7 @@ static const char* jammer_ui_errors[] = {
     "",
     "EXT NOT FOUND",
     "EXT BEGIN FAILED",
+    "INT NOT FOUND",
     "THREAD ALLOC FAILED",
     "TUNE BLOCKED",
     "SET TX FAILED",
@@ -87,11 +88,26 @@ static const char* jammer_ui_errors[] = {
     "TX WAIT FAILED",
 };
 
+static const char* jammer_radio_device_labels[] = {
+    "---",
+    "EXT",
+    "INT",
+};
+
 _Static_assert(COUNT_OF(jamming_modes) == JammerModeCount, "Jammer mode labels mismatch");
 _Static_assert(COUNT_OF(jammer_ui_states) == JammerUiStateCount, "Jammer state labels mismatch");
 _Static_assert(COUNT_OF(jammer_ui_errors) == JammerUiErrorCount, "Jammer error labels mismatch");
+_Static_assert(
+    COUNT_OF(jammer_radio_device_labels) == JammerRadioDeviceCount,
+    "Jammer radio device labels mismatch");
 
-static JammerUiError jammer_init_subghz(JammerApp* app);
+static JammerUiError
+    jammer_init_subghz(JammerApp* app, JammerRadioDevice radio_device_type);
+static void jammer_show_internal_warning(JammerApp* app, JammerUiError reason);
+static void jammer_accept_internal(JammerApp* app);
+static void jammer_retry_external(JammerApp* app);
+static void jammer_start_after_radio_init(JammerApp* app);
+static void jammer_release_radio(JammerApp* app);
 static void jammer_start_tx(JammerApp* app);
 static void jammer_stop_tx(JammerApp* app);
 static void jammer_toggle_tx(JammerApp* app);
@@ -100,6 +116,9 @@ static bool jammer_load_preset(JammerApp* app, JammerMode mode);
 static void jammer_update_view(JammerApp* app);
 static void jammer_set_ui_state(JammerApp* app, JammerUiState state);
 static JammerUiState jammer_get_ui_state(JammerApp* app);
+static JammerUiScreen jammer_get_ui_screen(JammerApp* app);
+static JammerRadioDevice jammer_get_requested_radio_device(JammerApp* app);
+static JammerUiError jammer_get_missing_device_error(JammerApp* app);
 static bool jammer_get_tx_elapsed_seconds(JammerApp* app, uint32_t* elapsed_seconds);
 static void jammer_set_ui_error(JammerApp* app, JammerUiError error);
 static void jammer_clear_ui_error(JammerApp* app);
@@ -128,13 +147,15 @@ int32_t jammer_app(void* p) {
     }
 
     jammer_set_ui_state(app, JammerUiStateStarting);
-    const JammerUiError init_error = jammer_init_subghz(app);
-    if(init_error != JammerUiErrorNone) {
+    const JammerUiError init_error =
+        jammer_init_subghz(app, JammerRadioDeviceExternal);
+    if(init_error == JammerUiErrorExternalNotFound ||
+       init_error == JammerUiErrorExternalBeginFailed) {
+        jammer_show_internal_warning(app, init_error);
+    } else if(init_error != JammerUiErrorNone) {
         jammer_set_ui_error(app, init_error);
     } else {
-        app->tx_requested = true;
-        jammer_clear_ui_error(app);
-        jammer_start_tx(app);
+        jammer_start_after_radio_init(app);
     }
 
     FURI_LOG_I(TAG, "Entering main loop");
@@ -148,6 +169,22 @@ int32_t jammer_app(void* p) {
 
     while(app->running) {
         if(furi_message_queue_get(app->event_queue, &event, 10) == FuriStatusOk) {
+            if(jammer_get_ui_screen(app) == JammerUiScreenInternalWarning) {
+                if(event.type == InputTypeLong && event.key == InputKeyOk) {
+                    FURI_LOG_I(TAG, "Retrying external CC1101 initialization");
+                    jammer_retry_external(app);
+                } else if(event.type == InputTypeShort) {
+                    if(event.key == InputKeyOk) {
+                        FURI_LOG_W(TAG, "Internal CC1101 use confirmed");
+                        jammer_accept_internal(app);
+                    } else if(event.key == InputKeyBack) {
+                        FURI_LOG_I(TAG, "Internal CC1101 warning declined");
+                        app->running = false;
+                    }
+                }
+                continue;
+            }
+
             if(event.type == InputTypeLong && event.key == InputKeyOk) {
                 FURI_LOG_I(TAG, "OK button held");
                 jammer_toggle_tx(app);
@@ -237,8 +274,12 @@ JammerApp* jammer_app_alloc(void) {
     app->running = true;
     app->tx_requested = false;
     app->jamming_mode = JammerModeOok650Async;
+    app->radio_device_type = JammerRadioDeviceNone;
+    app->requested_radio_device_type = JammerRadioDeviceExternal;
     app->ui_state = JammerUiStateIdle;
     app->ui_error = JammerUiErrorNone;
+    app->ui_screen = JammerUiScreenMain;
+    app->internal_warning = JammerInternalWarningExternalNotFound;
     app->tx_started_tick = 0;
 
     if(!jammer_override_region(app)) {
@@ -284,19 +325,10 @@ void jammer_app_free(JammerApp* app) {
 #ifdef FURI_DEBUG
     FURI_LOG_D(TAG, "Ending radio device");
 #endif
-    if(app->device) {
+    jammer_release_radio(app);
 #ifdef FURI_DEBUG
-        const char* device_name = app->device->name ? app->device->name : "Unknown";
-        FURI_LOG_D(TAG, "Device name: %s", device_name);
+    FURI_LOG_D(TAG, "Radio device ended");
 #endif
-
-        radio_device_loader_end(app->device);
-
-        app->device = NULL;
-#ifdef FURI_DEBUG
-        FURI_LOG_D(TAG, "Radio device ended");
-#endif
-    }
 
 #ifdef FURI_DEBUG
     FURI_LOG_D(TAG, "Calling subghz_devices_deinit");
@@ -350,22 +382,43 @@ void jammer_app_free(JammerApp* app) {
 #endif
 }
 
-static JammerUiError jammer_init_subghz(JammerApp* app) {
+static JammerUiError
+    jammer_init_subghz(JammerApp* app, JammerRadioDevice radio_device_type) {
 #ifdef FURI_DEBUG
     FURI_LOG_D(TAG, "Enter jammer_init_subghz");
 #endif
+    furi_assert(!app->device);
+    furi_assert(
+        radio_device_type == JammerRadioDeviceExternal ||
+        radio_device_type == JammerRadioDeviceInternal);
+
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->requested_radio_device_type = radio_device_type;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+
     RadioDeviceLoaderStatus loader_status;
-    app->device = radio_device_loader_set(&loader_status);
+    if(radio_device_type == JammerRadioDeviceExternal) {
+        app->device = radio_device_loader_set_external(&loader_status);
+    } else {
+        app->device = radio_device_loader_set_internal(&loader_status);
+    }
 
     if(!app->device) {
-        if(loader_status == RadioDeviceLoaderStatusBeginFailed) {
+        if(loader_status == RadioDeviceLoaderStatusExternalBeginFailed) {
             FURI_LOG_E(TAG, "External CC1101 was found but initialization failed.");
             return JammerUiErrorExternalBeginFailed;
+        } else if(loader_status == RadioDeviceLoaderStatusInternalNotFound) {
+            FURI_LOG_E(TAG, "Internal CC1101 was not found.");
+            return JammerUiErrorInternalNotFound;
         }
 
-        FURI_LOG_E(TAG, "External CC1101 is required but was not found.");
+        FURI_LOG_E(TAG, "External CC1101 was not found.");
         return JammerUiErrorExternalNotFound;
     }
+
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->radio_device_type = radio_device_type;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
 
     subghz_devices_reset(app->device);
     subghz_devices_idle(app->device);
@@ -385,6 +438,92 @@ static JammerUiError jammer_init_subghz(JammerApp* app) {
     return JammerUiErrorNone;
 }
 
+static void jammer_show_internal_warning(JammerApp* app, JammerUiError reason) {
+    furi_assert(
+        reason == JammerUiErrorExternalNotFound ||
+        reason == JammerUiErrorExternalBeginFailed);
+
+    app->tx_requested = false;
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->internal_warning = reason == JammerUiErrorExternalBeginFailed ?
+                                JammerInternalWarningExternalBeginFailed :
+                                JammerInternalWarningExternalNotFound;
+    app->ui_screen = JammerUiScreenInternalWarning;
+    app->ui_state = JammerUiStateIdle;
+    app->ui_error = JammerUiErrorNone;
+    app->tx_started_tick = 0;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+    jammer_update_view(app);
+}
+
+static void jammer_start_after_radio_init(JammerApp* app) {
+    furi_assert(app->device);
+
+    app->tx_requested = true;
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->ui_screen = JammerUiScreenMain;
+    app->ui_error = JammerUiErrorNone;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+    jammer_start_tx(app);
+}
+
+static void jammer_accept_internal(JammerApp* app) {
+    furi_assert(!app->device);
+
+    const JammerUiError init_error =
+        jammer_init_subghz(app, JammerRadioDeviceInternal);
+    if(init_error == JammerUiErrorNone) {
+        jammer_start_after_radio_init(app);
+    } else {
+        app->tx_requested = false;
+        jammer_set_ui_error(app, init_error);
+    }
+}
+
+static void jammer_retry_external(JammerApp* app) {
+    furi_assert(!app->device);
+
+    const JammerUiError init_error =
+        jammer_init_subghz(app, JammerRadioDeviceExternal);
+    if(init_error == JammerUiErrorNone) {
+        jammer_start_after_radio_init(app);
+    } else if(
+        init_error == JammerUiErrorExternalNotFound ||
+        init_error == JammerUiErrorExternalBeginFailed) {
+        jammer_show_internal_warning(app, init_error);
+    } else {
+        app->tx_requested = false;
+        jammer_set_ui_error(app, init_error);
+    }
+}
+
+static void jammer_release_radio(JammerApp* app) {
+    if(!app->device) {
+        return;
+    }
+
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    const JammerRadioDevice radio_device_type = app->radio_device_type;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+
+#ifdef FURI_DEBUG
+    const char* device_name = app->device->name ? app->device->name : "Unknown";
+    FURI_LOG_D(TAG, "Device name: %s", device_name);
+#endif
+
+    if(radio_device_type == JammerRadioDeviceExternal) {
+        radio_device_loader_end_external(app->device);
+    } else {
+        subghz_devices_idle(app->device);
+        subghz_devices_sleep(app->device);
+    }
+
+    app->device = NULL;
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->radio_device_type = JammerRadioDeviceNone;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+}
+
 static void jammer_draw_callback(Canvas* canvas, void* context) {
     JammerApp* app = (JammerApp*)context;
     uint32_t frequency;
@@ -392,6 +531,9 @@ static void jammer_draw_callback(Canvas* canvas, void* context) {
     JammerMode mode;
     JammerUiState state;
     JammerUiError error;
+    JammerUiScreen screen;
+    JammerInternalWarning internal_warning;
+    JammerRadioDevice radio_device_type;
     uint32_t tx_started_tick;
 
     furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
@@ -400,12 +542,39 @@ static void jammer_draw_callback(Canvas* canvas, void* context) {
     mode = app->jamming_mode;
     state = app->ui_state;
     error = app->ui_error;
+    screen = app->ui_screen;
+    internal_warning = app->internal_warning;
+    radio_device_type = app->radio_device_type;
     tx_started_tick = app->tx_started_tick;
     furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
 
     canvas_clear(canvas);
 
+    if(screen == JammerUiScreenInternalWarning) {
+        const char* warning_title =
+            internal_warning == JammerInternalWarningExternalBeginFailed ?
+                "EXT INIT FAILED" :
+                "EXT NOT FOUND";
+
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str_aligned(canvas, 64, 1, AlignCenter, AlignTop, warning_title);
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str_aligned(canvas, 64, 13, AlignCenter, AlignTop, "LONG TX MAY DAMAGE");
+        canvas_draw_str_aligned(canvas, 64, 23, AlignCenter, AlignTop, "INTERNAL RADIO");
+        canvas_draw_str_aligned(canvas, 64, 35, AlignCenter, AlignTop, "OK: USE INTERNAL");
+        canvas_draw_str_aligned(canvas, 64, 45, AlignCenter, AlignTop, "HOLD OK: RETRY EXT");
+        canvas_draw_str_aligned(canvas, 64, 55, AlignCenter, AlignTop, "BACK: EXIT");
+        return;
+    }
+
     canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str_aligned(
+        canvas,
+        64,
+        1,
+        AlignCenter,
+        AlignTop,
+        jammer_radio_device_labels[radio_device_type]);
     canvas_draw_str_aligned(canvas, 126, 1, AlignRight, AlignTop, jammer_ui_states[state]);
 
     if(state == JammerUiStateTransmitting) {
@@ -533,8 +702,8 @@ static void jammer_adjust_frequency(JammerApp* app, bool up) {
     FURI_LOG_I(TAG, "Frequency adjusted to %lu Hz", frequency);
 
     if(!app->device) {
-        FURI_LOG_E(TAG, "Cannot adjust frequency: external CC1101 is unavailable");
-        jammer_set_ui_error(app, JammerUiErrorExternalNotFound);
+        FURI_LOG_E(TAG, "Cannot adjust frequency: selected CC1101 is unavailable");
+        jammer_set_ui_error(app, jammer_get_missing_device_error(app));
     } else if(restart_tx) {
         jammer_clear_ui_error(app);
         jammer_start_tx(app);
@@ -564,8 +733,8 @@ static void jammer_switch_mode(JammerApp* app) {
     furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
 
     if(!app->device) {
-        FURI_LOG_E(TAG, "Cannot switch mode: external CC1101 is unavailable");
-        jammer_set_ui_error(app, JammerUiErrorExternalNotFound);
+        FURI_LOG_E(TAG, "Cannot switch mode: selected CC1101 is unavailable");
+        jammer_set_ui_error(app, jammer_get_missing_device_error(app));
         return;
     }
 
@@ -631,10 +800,18 @@ static void jammer_toggle_tx(JammerApp* app) {
         }
 
         if(!app->device) {
-            const JammerUiError init_error = jammer_init_subghz(app);
+            const JammerRadioDevice radio_device_type =
+                jammer_get_requested_radio_device(app);
+            const JammerUiError init_error =
+                jammer_init_subghz(app, radio_device_type);
             if(init_error != JammerUiErrorNone) {
                 app->tx_requested = false;
-                jammer_set_ui_error(app, init_error);
+                if(init_error == JammerUiErrorExternalNotFound ||
+                   init_error == JammerUiErrorExternalBeginFailed) {
+                    jammer_show_internal_warning(app, init_error);
+                } else {
+                    jammer_set_ui_error(app, init_error);
+                }
                 return;
             }
         }
@@ -653,9 +830,17 @@ static void jammer_toggle_tx(JammerApp* app) {
     }
 
     if(!app->device) {
-        const JammerUiError init_error = jammer_init_subghz(app);
+        const JammerRadioDevice radio_device_type =
+            jammer_get_requested_radio_device(app);
+        const JammerUiError init_error =
+            jammer_init_subghz(app, radio_device_type);
         if(init_error != JammerUiErrorNone) {
-            jammer_set_ui_error(app, init_error);
+            if(init_error == JammerUiErrorExternalNotFound ||
+               init_error == JammerUiErrorExternalBeginFailed) {
+                jammer_show_internal_warning(app, init_error);
+            } else {
+                jammer_set_ui_error(app, init_error);
+            }
             return;
         }
     }
@@ -671,7 +856,7 @@ static void jammer_start_tx(JammerApp* app) {
 #endif
 
     if(!app->device) {
-        jammer_set_ui_error(app, JammerUiErrorExternalNotFound);
+        jammer_set_ui_error(app, jammer_get_missing_device_error(app));
         return;
     }
 
@@ -976,6 +1161,26 @@ static JammerUiState jammer_get_ui_state(JammerApp* app) {
     return state;
 }
 
+static JammerUiScreen jammer_get_ui_screen(JammerApp* app) {
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    const JammerUiScreen screen = app->ui_screen;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+    return screen;
+}
+
+static JammerRadioDevice jammer_get_requested_radio_device(JammerApp* app) {
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    const JammerRadioDevice radio_device_type = app->requested_radio_device_type;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+    return radio_device_type;
+}
+
+static JammerUiError jammer_get_missing_device_error(JammerApp* app) {
+    return jammer_get_requested_radio_device(app) == JammerRadioDeviceInternal ?
+               JammerUiErrorInternalNotFound :
+               JammerUiErrorExternalNotFound;
+}
+
 static bool jammer_get_tx_elapsed_seconds(JammerApp* app, uint32_t* elapsed_seconds) {
     furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
     const bool is_transmitting = app->ui_state == JammerUiStateTransmitting;
@@ -995,6 +1200,7 @@ static void jammer_set_ui_error(JammerApp* app, JammerUiError error) {
     furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
     app->ui_error = error;
     app->ui_state = JammerUiStateError;
+    app->ui_screen = JammerUiScreenMain;
     furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
     jammer_update_view(app);
 }
