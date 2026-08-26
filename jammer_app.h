@@ -20,6 +20,25 @@ typedef enum {
 } JammerMode;
 
 typedef enum {
+    JammerRadioDeviceNone,
+    JammerRadioDeviceExternal,
+    JammerRadioDeviceInternal,
+    JammerRadioDeviceCount,
+} JammerRadioDevice;
+
+typedef enum {
+    JammerUiScreenMain,
+    JammerUiScreenInternalWarning,
+    JammerUiScreenCount,
+} JammerUiScreen;
+
+typedef enum {
+    JammerInternalWarningExternalNotFound,
+    JammerInternalWarningExternalBeginFailed,
+    JammerInternalWarningCount,
+} JammerInternalWarning;
+
+typedef enum {
     JammerUiStateIdle,
     JammerUiStateStarting,
     JammerUiStateTransmitting,
@@ -32,6 +51,7 @@ typedef enum {
     JammerUiErrorNone,
     JammerUiErrorExternalNotFound,
     JammerUiErrorExternalBeginFailed,
+    JammerUiErrorInternalNotFound,
     JammerUiErrorThreadAllocFailed,
     JammerUiErrorTuneBlocked,
     JammerUiErrorSetTxFailed,
@@ -52,11 +72,15 @@ typedef struct {
     bool running;
     bool tx_requested;
     const SubGhzDevice* device;
+    JammerRadioDevice radio_device_type;
+    JammerRadioDevice requested_radio_device_type;
     FuriThread* tx_thread;
     FuriMutex* ui_mutex;
     JammerMode jamming_mode;
     JammerUiState ui_state;
     JammerUiError ui_error;
+    JammerUiScreen ui_screen;
+    JammerInternalWarning internal_warning;
     uint32_t tx_started_tick;
     FuriHalRegion* saved_region;
     bool region_overridden;
