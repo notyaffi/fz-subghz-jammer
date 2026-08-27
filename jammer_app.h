@@ -29,6 +29,10 @@ typedef enum {
 typedef enum {
     JammerUiScreenMain,
     JammerUiScreenInternalWarning,
+    JammerUiScreenConfig,
+    JammerUiScreenModeSelect,
+    JammerUiScreenAuthors,
+    JammerUiScreenConfigSaveError,
     JammerUiScreenCount,
 } JammerUiScreen;
 
@@ -63,6 +67,21 @@ typedef enum {
     JammerUiErrorCount,
 } JammerUiError;
 
+typedef enum {
+    JammerConfigItemFrequency,
+    JammerConfigItemMode,
+    JammerConfigItemAutoStart,
+    JammerConfigItemAuthors,
+    JammerConfigItemCount,
+} JammerConfigItem;
+
+typedef struct {
+    uint32_t default_frequency;
+    uint8_t default_mode;
+    uint8_t auto_start;
+    uint8_t reserved[2];
+} JammerSettings;
+
 typedef struct {
     Gui* gui;
     ViewPort* view_port;
@@ -77,6 +96,9 @@ typedef struct {
     FuriThread* tx_thread;
     FuriMutex* ui_mutex;
     JammerMode jamming_mode;
+    JammerSettings settings;
+    JammerConfigItem config_cursor;
+    JammerMode mode_cursor;
     JammerUiState ui_state;
     JammerUiError ui_error;
     JammerUiScreen ui_screen;

@@ -1,11 +1,14 @@
 #include "jammer_app.h"
 #include <furi_hal_region.h>
 #include <furi.h>
+#include <gui/elements.h>
 #include <gui/gui.h>
+#include <storage/storage.h>
 #include <subghz/devices/devices.h>
 #include <furi/core/log.h>
 #include <furi_hal.h>
 #include <toolbox/level_duration.h>
+#include <toolbox/saved_struct.h>
 #include "helpers/radio_device_loader.h"
 
 #define TAG "JammerApp"
@@ -17,6 +20,13 @@
 #define JAMMER_OOK_BIT_DURATION_US 264
 #define JAMMER_2FSK_BIT_DURATION_US 208
 #define JAMMER_TX_FLAG_STOP (1U << 0)
+#define JAMMER_SETTINGS_PATH APP_DATA_PATH("settings.bin")
+#define JAMMER_SETTINGS_MAGIC 0x4A
+#define JAMMER_SETTINGS_VERSION 1
+#define JAMMER_DEFAULT_FREQUENCY 315000000U
+#define JAMMER_DEFAULT_MODE JammerModeOok650Async
+#define JAMMER_DEFAULT_AUTO_START true
+#define JAMMER_MODE_LIST_VISIBLE_ROWS 4U
 
 static const FuriHalRegionBand unlocked_region_bands[] = {
     {.start = 299999755, .end = 348000000, .power_limit = 20, .duty_cycle = 50},
@@ -28,6 +38,11 @@ typedef struct {
     uint32_t min;
     uint32_t max;
 } FrequencyBand;
+
+typedef struct {
+    uint32_t frequency;
+    const char* label;
+} JammerFrequencyOption;
 
 typedef struct {
     const uint8_t* data;
@@ -49,6 +64,12 @@ static const FrequencyBand valid_frequency_bands[] = {
     {300000000, 348000000},
     {387000000, 464000000},
     {779000000, 928000000},
+};
+
+static const JammerFrequencyOption jammer_frequency_options[] = {
+    {.frequency = 315000000U, .label = "315.00"},
+    {.frequency = 318000000U, .label = "318.00"},
+    {.frequency = 433920000U, .label = "433.92"},
 };
 
 #define NUM_FREQUENCY_BANDS (sizeof(valid_frequency_bands) / sizeof(valid_frequency_bands[0]))
@@ -100,13 +121,14 @@ _Static_assert(COUNT_OF(jammer_ui_errors) == JammerUiErrorCount, "Jammer error l
 _Static_assert(
     COUNT_OF(jammer_radio_device_labels) == JammerRadioDeviceCount,
     "Jammer radio device labels mismatch");
+_Static_assert(sizeof(JammerSettings) == 8U, "Jammer settings layout mismatch");
 
 static JammerUiError
     jammer_init_subghz(JammerApp* app, JammerRadioDevice radio_device_type);
 static void jammer_show_internal_warning(JammerApp* app, JammerUiError reason);
 static void jammer_accept_internal(JammerApp* app);
 static void jammer_retry_external(JammerApp* app);
-static void jammer_start_after_radio_init(JammerApp* app);
+static void jammer_complete_radio_init(JammerApp* app);
 static void jammer_release_radio(JammerApp* app);
 static void jammer_start_tx(JammerApp* app);
 static void jammer_stop_tx(JammerApp* app);
@@ -134,6 +156,29 @@ static bool jammer_tx_wait_for_stop(uint32_t timeout);
 static JammerPacketResult jammer_send_packet(JammerApp* app, const uint8_t* data, uint8_t size);
 static void jammer_draw_callback(Canvas* canvas, void* context);
 static void jammer_input_callback(InputEvent* input_event, void* context);
+static JammerSettings jammer_settings_defaults(void);
+static bool jammer_settings_are_valid(const JammerSettings* settings);
+static void jammer_load_settings(JammerApp* app);
+static bool jammer_save_settings(const JammerSettings* settings);
+static bool jammer_can_open_config(JammerApp* app);
+static void jammer_open_config(JammerApp* app);
+static void jammer_show_config_save_error(JammerApp* app);
+static void jammer_handle_config_input(JammerApp* app, const InputEvent* event);
+static void jammer_handle_mode_select_input(JammerApp* app, const InputEvent* event);
+static void jammer_handle_authors_input(JammerApp* app, const InputEvent* event);
+static void jammer_handle_config_save_error_input(JammerApp* app, const InputEvent* event);
+static void jammer_config_change_frequency(JammerApp* app, bool next);
+static void jammer_config_set_auto_start(JammerApp* app, bool enabled);
+static void jammer_config_open_mode_select(JammerApp* app);
+static void jammer_config_commit_mode(JammerApp* app);
+static size_t jammer_frequency_option_index(uint32_t frequency);
+static void jammer_draw_config(
+    Canvas* canvas,
+    const JammerSettings* settings,
+    JammerConfigItem cursor);
+static void jammer_draw_mode_select(Canvas* canvas, JammerMode cursor);
+static void jammer_draw_authors(Canvas* canvas);
+static void jammer_draw_config_save_error(Canvas* canvas);
 
 int32_t jammer_app(void* p) {
     UNUSED(p);
@@ -155,7 +200,7 @@ int32_t jammer_app(void* p) {
     } else if(init_error != JammerUiErrorNone) {
         jammer_set_ui_error(app, init_error);
     } else {
-        jammer_start_after_radio_init(app);
+        jammer_complete_radio_init(app);
     }
 
     FURI_LOG_I(TAG, "Entering main loop");
@@ -169,7 +214,8 @@ int32_t jammer_app(void* p) {
 
     while(app->running) {
         if(furi_message_queue_get(app->event_queue, &event, 10) == FuriStatusOk) {
-            if(jammer_get_ui_screen(app) == JammerUiScreenInternalWarning) {
+            const JammerUiScreen screen = jammer_get_ui_screen(app);
+            if(screen == JammerUiScreenInternalWarning) {
                 if(event.type == InputTypeLong && event.key == InputKeyOk) {
                     FURI_LOG_I(TAG, "Retrying external CC1101 initialization");
                     jammer_retry_external(app);
@@ -185,7 +231,24 @@ int32_t jammer_app(void* p) {
                 continue;
             }
 
-            if(event.type == InputTypeLong && event.key == InputKeyOk) {
+            if(screen == JammerUiScreenConfig) {
+                jammer_handle_config_input(app, &event);
+                continue;
+            } else if(screen == JammerUiScreenModeSelect) {
+                jammer_handle_mode_select_input(app, &event);
+                continue;
+            } else if(screen == JammerUiScreenAuthors) {
+                jammer_handle_authors_input(app, &event);
+                continue;
+            } else if(screen == JammerUiScreenConfigSaveError) {
+                jammer_handle_config_save_error_input(app, &event);
+                continue;
+            }
+
+            if(event.type == InputTypeLong && event.key == InputKeyLeft) {
+                FURI_LOG_I(TAG, "Left button held");
+                jammer_open_config(app);
+            } else if(event.type == InputTypeLong && event.key == InputKeyOk) {
                 FURI_LOG_I(TAG, "OK button held");
                 jammer_toggle_tx(app);
             } else if(event.type == InputTypeShort) {
@@ -269,11 +332,15 @@ JammerApp* jammer_app_alloc(void) {
         return NULL;
     }
 
-    app->frequency = 315000000;
+    jammer_load_settings(app);
+
+    app->frequency = app->settings.default_frequency;
     app->cursor_position = 0;
     app->running = true;
     app->tx_requested = false;
-    app->jamming_mode = JammerModeOok650Async;
+    app->jamming_mode = (JammerMode)app->settings.default_mode;
+    app->config_cursor = JammerConfigItemFrequency;
+    app->mode_cursor = app->jamming_mode;
     app->radio_device_type = JammerRadioDeviceNone;
     app->requested_radio_device_type = JammerRadioDeviceExternal;
     app->ui_state = JammerUiStateIdle;
@@ -456,15 +523,21 @@ static void jammer_show_internal_warning(JammerApp* app, JammerUiError reason) {
     jammer_update_view(app);
 }
 
-static void jammer_start_after_radio_init(JammerApp* app) {
+static void jammer_complete_radio_init(JammerApp* app) {
     furi_assert(app->device);
 
-    app->tx_requested = true;
     furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
     app->ui_screen = JammerUiScreenMain;
     app->ui_error = JammerUiErrorNone;
+    const bool auto_start = app->settings.auto_start != 0U;
     furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
-    jammer_start_tx(app);
+
+    app->tx_requested = auto_start;
+    if(auto_start) {
+        jammer_start_tx(app);
+    } else {
+        jammer_set_ui_state(app, JammerUiStateIdle);
+    }
 }
 
 static void jammer_accept_internal(JammerApp* app) {
@@ -473,7 +546,7 @@ static void jammer_accept_internal(JammerApp* app) {
     const JammerUiError init_error =
         jammer_init_subghz(app, JammerRadioDeviceInternal);
     if(init_error == JammerUiErrorNone) {
-        jammer_start_after_radio_init(app);
+        jammer_complete_radio_init(app);
     } else {
         app->tx_requested = false;
         jammer_set_ui_error(app, init_error);
@@ -486,7 +559,7 @@ static void jammer_retry_external(JammerApp* app) {
     const JammerUiError init_error =
         jammer_init_subghz(app, JammerRadioDeviceExternal);
     if(init_error == JammerUiErrorNone) {
-        jammer_start_after_radio_init(app);
+        jammer_complete_radio_init(app);
     } else if(
         init_error == JammerUiErrorExternalNotFound ||
         init_error == JammerUiErrorExternalBeginFailed) {
@@ -524,6 +597,389 @@ static void jammer_release_radio(JammerApp* app) {
     furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
 }
 
+static JammerSettings jammer_settings_defaults(void) {
+    const JammerSettings settings = {
+        .default_frequency = JAMMER_DEFAULT_FREQUENCY,
+        .default_mode = (uint8_t)JAMMER_DEFAULT_MODE,
+        .auto_start = (uint8_t)JAMMER_DEFAULT_AUTO_START,
+        .reserved = {0U, 0U},
+    };
+    return settings;
+}
+
+static size_t jammer_frequency_option_index(uint32_t frequency) {
+    for(size_t i = 0; i < COUNT_OF(jammer_frequency_options); i++) {
+        if(jammer_frequency_options[i].frequency == frequency) {
+            return i;
+        }
+    }
+
+    return 0U;
+}
+
+static bool jammer_settings_are_valid(const JammerSettings* settings) {
+    bool frequency_is_valid = false;
+    for(size_t i = 0; i < COUNT_OF(jammer_frequency_options); i++) {
+        if(jammer_frequency_options[i].frequency == settings->default_frequency) {
+            frequency_is_valid = true;
+            break;
+        }
+    }
+
+    return frequency_is_valid && settings->default_mode < JammerModeCount &&
+           settings->auto_start <= 1U;
+}
+
+static void jammer_load_settings(JammerApp* app) {
+    JammerSettings settings = jammer_settings_defaults();
+    JammerSettings stored_settings;
+
+    if(saved_struct_load(
+           JAMMER_SETTINGS_PATH,
+           &stored_settings,
+           sizeof(stored_settings),
+           JAMMER_SETTINGS_MAGIC,
+           JAMMER_SETTINGS_VERSION) &&
+       jammer_settings_are_valid(&stored_settings)) {
+        settings = stored_settings;
+        FURI_LOG_I(TAG, "Loaded saved settings");
+    } else {
+        FURI_LOG_I(TAG, "Using default settings");
+    }
+
+    app->settings = settings;
+}
+
+static bool jammer_save_settings(const JammerSettings* settings) {
+    return saved_struct_save(
+        JAMMER_SETTINGS_PATH,
+        settings,
+        sizeof(*settings),
+        JAMMER_SETTINGS_MAGIC,
+        JAMMER_SETTINGS_VERSION);
+}
+
+static bool jammer_can_open_config(JammerApp* app) {
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    const bool ui_is_idle = app->ui_screen == JammerUiScreenMain &&
+                            app->ui_state == JammerUiStateIdle;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+
+    return ui_is_idle && !app->tx_requested && app->tx_thread == NULL;
+}
+
+static void jammer_open_config(JammerApp* app) {
+    if(!jammer_can_open_config(app)) {
+        return;
+    }
+
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->config_cursor = JammerConfigItemFrequency;
+    app->mode_cursor = (JammerMode)app->settings.default_mode;
+    app->ui_screen = JammerUiScreenConfig;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+    jammer_update_view(app);
+}
+
+static void jammer_show_config_save_error(JammerApp* app) {
+    FURI_LOG_E(TAG, "Failed to save settings");
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->ui_screen = JammerUiScreenConfigSaveError;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+    jammer_update_view(app);
+}
+
+static void jammer_config_change_frequency(JammerApp* app, bool next) {
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    JammerSettings candidate = app->settings;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+
+    size_t index = jammer_frequency_option_index(candidate.default_frequency);
+    if(next) {
+        index = (index + 1U) % COUNT_OF(jammer_frequency_options);
+    } else {
+        index = (index + COUNT_OF(jammer_frequency_options) - 1U) %
+                COUNT_OF(jammer_frequency_options);
+    }
+    candidate.default_frequency = jammer_frequency_options[index].frequency;
+
+    if(!jammer_save_settings(&candidate)) {
+        jammer_show_config_save_error(app);
+        return;
+    }
+
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->settings = candidate;
+    app->frequency = candidate.default_frequency;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+    FURI_LOG_I(TAG, "Default frequency saved: %lu Hz", candidate.default_frequency);
+    jammer_update_view(app);
+}
+
+static void jammer_config_set_auto_start(JammerApp* app, bool enabled) {
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    JammerSettings candidate = app->settings;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+
+    const uint8_t new_value = enabled ? 1U : 0U;
+    if(candidate.auto_start == new_value) {
+        return;
+    }
+    candidate.auto_start = new_value;
+
+    if(!jammer_save_settings(&candidate)) {
+        jammer_show_config_save_error(app);
+        return;
+    }
+
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->settings = candidate;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+    FURI_LOG_I(TAG, "Auto Start saved: %s", enabled ? "ON" : "OFF");
+    jammer_update_view(app);
+}
+
+static void jammer_config_open_mode_select(JammerApp* app) {
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->mode_cursor = (JammerMode)app->settings.default_mode;
+    app->ui_screen = JammerUiScreenModeSelect;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+    jammer_update_view(app);
+}
+
+static void jammer_config_commit_mode(JammerApp* app) {
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    JammerSettings candidate = app->settings;
+    const uint8_t saved_mode = candidate.default_mode;
+    const JammerMode selected_mode = app->mode_cursor;
+    const JammerMode current_mode = app->jamming_mode;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+
+    candidate.default_mode = (uint8_t)selected_mode;
+    const bool settings_changed = candidate.default_mode != saved_mode;
+    if(settings_changed && !jammer_save_settings(&candidate)) {
+        jammer_show_config_save_error(app);
+        return;
+    }
+
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    app->settings = candidate;
+    app->jamming_mode = selected_mode;
+    app->ui_screen = JammerUiScreenConfig;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+
+    if(current_mode != selected_mode && app->device) {
+        subghz_devices_reset(app->device);
+        subghz_devices_idle(app->device);
+        if(!jammer_load_preset(app, selected_mode)) {
+            jammer_set_ui_error(app, JammerUiErrorInvalidPreset);
+            return;
+        }
+    }
+
+    if(settings_changed) {
+        FURI_LOG_I(TAG, "Default mode saved: %s", jamming_modes[selected_mode]);
+    }
+    jammer_update_view(app);
+}
+
+static void jammer_handle_config_input(JammerApp* app, const InputEvent* event) {
+    if(event->type != InputTypeShort) {
+        return;
+    }
+
+    furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+    const JammerConfigItem cursor = app->config_cursor;
+    furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+
+    if(event->key == InputKeyUp || event->key == InputKeyDown) {
+        furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+        if(event->key == InputKeyUp) {
+            app->config_cursor = (JammerConfigItem)(
+                (app->config_cursor + JammerConfigItemCount - 1U) % JammerConfigItemCount);
+        } else {
+            app->config_cursor =
+                (JammerConfigItem)((app->config_cursor + 1U) % JammerConfigItemCount);
+        }
+        furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+        jammer_update_view(app);
+    } else if(event->key == InputKeyLeft) {
+        if(cursor == JammerConfigItemFrequency) {
+            jammer_config_change_frequency(app, false);
+        } else if(cursor == JammerConfigItemAutoStart) {
+            jammer_config_set_auto_start(app, false);
+        }
+    } else if(event->key == InputKeyRight) {
+        if(cursor == JammerConfigItemFrequency) {
+            jammer_config_change_frequency(app, true);
+        } else if(cursor == JammerConfigItemAutoStart) {
+            jammer_config_set_auto_start(app, true);
+        }
+    } else if(event->key == InputKeyOk) {
+        if(cursor == JammerConfigItemMode) {
+            jammer_config_open_mode_select(app);
+        } else if(cursor == JammerConfigItemAuthors) {
+            furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+            app->ui_screen = JammerUiScreenAuthors;
+            furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+            jammer_update_view(app);
+        }
+    } else if(event->key == InputKeyBack) {
+        furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+        app->ui_screen = JammerUiScreenMain;
+        furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+        jammer_update_view(app);
+    }
+}
+
+static void jammer_handle_mode_select_input(JammerApp* app, const InputEvent* event) {
+    if(event->type != InputTypeShort) {
+        return;
+    }
+
+    if(event->key == InputKeyUp || event->key == InputKeyDown) {
+        furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+        if(event->key == InputKeyUp) {
+            app->mode_cursor =
+                (JammerMode)((app->mode_cursor + JammerModeCount - 1U) % JammerModeCount);
+        } else {
+            app->mode_cursor = (JammerMode)((app->mode_cursor + 1U) % JammerModeCount);
+        }
+        furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+        jammer_update_view(app);
+    } else if(event->key == InputKeyOk) {
+        jammer_config_commit_mode(app);
+    } else if(event->key == InputKeyBack) {
+        furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+        app->ui_screen = JammerUiScreenConfig;
+        furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+        jammer_update_view(app);
+    }
+}
+
+static void jammer_handle_authors_input(JammerApp* app, const InputEvent* event) {
+    if(event->type == InputTypeShort &&
+       (event->key == InputKeyOk || event->key == InputKeyBack)) {
+        furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+        app->ui_screen = JammerUiScreenConfig;
+        furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+        jammer_update_view(app);
+    }
+}
+
+static void jammer_handle_config_save_error_input(
+    JammerApp* app,
+    const InputEvent* event) {
+    if(event->type == InputTypeShort &&
+       (event->key == InputKeyOk || event->key == InputKeyBack)) {
+        furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
+        app->ui_screen = JammerUiScreenConfig;
+        furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
+        jammer_update_view(app);
+    }
+}
+
+static void jammer_draw_config_row(
+    Canvas* canvas,
+    uint8_t y,
+    const char* text,
+    bool selected) {
+    if(selected) {
+        canvas_draw_box(canvas, 0, y, canvas_width(canvas), 10);
+        canvas_invert_color(canvas);
+    }
+
+    canvas_draw_str_aligned(canvas, 2, y + 1, AlignLeft, AlignTop, text);
+
+    if(selected) {
+        canvas_invert_color(canvas);
+    }
+}
+
+static void jammer_draw_config(
+    Canvas* canvas,
+    const JammerSettings* settings,
+    JammerConfigItem cursor) {
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str_aligned(canvas, 64, 0, AlignCenter, AlignTop, "CONFIG");
+
+    canvas_set_font(canvas, FontSecondary);
+    char row[32];
+    const size_t frequency_index =
+        jammer_frequency_option_index(settings->default_frequency);
+
+    snprintf(
+        row,
+        sizeof(row),
+        "Frequency: %s",
+        jammer_frequency_options[frequency_index].label);
+    jammer_draw_config_row(canvas, 12, row, cursor == JammerConfigItemFrequency);
+
+    snprintf(row, sizeof(row), "Mode: %s", jamming_modes[settings->default_mode]);
+    jammer_draw_config_row(canvas, 22, row, cursor == JammerConfigItemMode);
+
+    snprintf(row, sizeof(row), "Auto Start: %s", settings->auto_start ? "ON" : "OFF");
+    jammer_draw_config_row(canvas, 32, row, cursor == JammerConfigItemAutoStart);
+    jammer_draw_config_row(canvas, 42, "Authors", cursor == JammerConfigItemAuthors);
+
+    canvas_set_font(canvas, FontSecondary);
+    if(cursor == JammerConfigItemFrequency) {
+        elements_button_left(canvas, "Prev");
+        elements_button_right(canvas, "Next");
+    } else if(cursor == JammerConfigItemMode) {
+        elements_button_center(canvas, "Select");
+    } else if(cursor == JammerConfigItemAutoStart) {
+        elements_button_left(canvas, "Off");
+        elements_button_right(canvas, "On");
+    } else if(cursor == JammerConfigItemAuthors) {
+        elements_button_center(canvas, "Open");
+    }
+}
+
+static void jammer_draw_mode_select(Canvas* canvas, JammerMode cursor) {
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str_aligned(canvas, 64, 0, AlignCenter, AlignTop, "DEFAULT MODE");
+
+    size_t first_visible = 0U;
+    if((size_t)cursor >= JAMMER_MODE_LIST_VISIBLE_ROWS) {
+        first_visible = (size_t)cursor - JAMMER_MODE_LIST_VISIBLE_ROWS + 1U;
+    }
+
+    canvas_set_font(canvas, FontSecondary);
+    for(size_t row = 0; row < JAMMER_MODE_LIST_VISIBLE_ROWS; row++) {
+        const size_t mode_index = first_visible + row;
+        if(mode_index >= JammerModeCount) {
+            break;
+        }
+        jammer_draw_config_row(
+            canvas,
+            (uint8_t)(12U + (row * 10U)),
+            jamming_modes[mode_index],
+            mode_index == (size_t)cursor);
+    }
+
+    canvas_set_font(canvas, FontSecondary);
+    elements_button_center(canvas, "Select");
+}
+
+static void jammer_draw_authors(Canvas* canvas) {
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "AUTHORS");
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str_aligned(canvas, 64, 16, AlignCenter, AlignTop, "@notyaffi");
+    canvas_draw_str_aligned(canvas, 64, 28, AlignCenter, AlignTop, "Original source:");
+    canvas_draw_str_aligned(canvas, 64, 39, AlignCenter, AlignTop, "@RocketGod-git");
+    elements_button_center(canvas, "Back");
+}
+
+static void jammer_draw_config_save_error(Canvas* canvas) {
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str_aligned(canvas, 64, 8, AlignCenter, AlignTop, "CONFIG SAVE FAILED");
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str_aligned(canvas, 64, 27, AlignCenter, AlignTop, "SETTING NOT CHANGED");
+    elements_button_center(canvas, "Back");
+}
+
 static void jammer_draw_callback(Canvas* canvas, void* context) {
     JammerApp* app = (JammerApp*)context;
     uint32_t frequency;
@@ -535,6 +991,9 @@ static void jammer_draw_callback(Canvas* canvas, void* context) {
     JammerInternalWarning internal_warning;
     JammerRadioDevice radio_device_type;
     uint32_t tx_started_tick;
+    JammerSettings settings;
+    JammerConfigItem config_cursor;
+    JammerMode mode_cursor;
 
     furi_check(furi_mutex_acquire(app->ui_mutex, FuriWaitForever) == FuriStatusOk);
     frequency = app->frequency;
@@ -546,6 +1005,9 @@ static void jammer_draw_callback(Canvas* canvas, void* context) {
     internal_warning = app->internal_warning;
     radio_device_type = app->radio_device_type;
     tx_started_tick = app->tx_started_tick;
+    settings = app->settings;
+    config_cursor = app->config_cursor;
+    mode_cursor = app->mode_cursor;
     furi_check(furi_mutex_release(app->ui_mutex) == FuriStatusOk);
 
     canvas_clear(canvas);
@@ -564,6 +1026,20 @@ static void jammer_draw_callback(Canvas* canvas, void* context) {
         canvas_draw_str_aligned(canvas, 64, 35, AlignCenter, AlignTop, "OK: USE INTERNAL");
         canvas_draw_str_aligned(canvas, 64, 45, AlignCenter, AlignTop, "HOLD OK: RETRY EXT");
         canvas_draw_str_aligned(canvas, 64, 55, AlignCenter, AlignTop, "BACK: EXIT");
+        return;
+    }
+
+    if(screen == JammerUiScreenConfig) {
+        jammer_draw_config(canvas, &settings, config_cursor);
+        return;
+    } else if(screen == JammerUiScreenModeSelect) {
+        jammer_draw_mode_select(canvas, mode_cursor);
+        return;
+    } else if(screen == JammerUiScreenAuthors) {
+        jammer_draw_authors(canvas);
+        return;
+    } else if(screen == JammerUiScreenConfigSaveError) {
+        jammer_draw_config_save_error(canvas);
         return;
     }
 
@@ -642,20 +1118,31 @@ static void jammer_draw_callback(Canvas* canvas, void* context) {
     } else if(state == JammerUiStateStopping) {
         canvas_draw_str_aligned(canvas, 64, 44, AlignCenter, AlignTop, "STOPPING...");
     } else {
-        canvas_draw_str_aligned(canvas, 64, 44, AlignCenter, AlignTop, "HOLD OK: START");
+        canvas_draw_str_aligned(canvas, 64, 34, AlignCenter, AlignTop, "HOLD OK: START");
     }
 
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str_aligned(canvas, 64, 55, AlignCenter, AlignTop, jamming_modes[mode]);
+    canvas_draw_str_aligned(
+        canvas,
+        64,
+        state == JammerUiStateIdle ? 44 : 55,
+        AlignCenter,
+        AlignTop,
+        jamming_modes[mode]);
+    if(state == JammerUiStateIdle) {
+        canvas_set_font(canvas, FontSecondary);
+        elements_button_left(canvas, "Hold Config");
+    }
 }
 
 static void jammer_input_callback(InputEvent* input_event, void* context) {
     JammerApp* app = (JammerApp*)context;
     const bool is_short_press = input_event->type == InputTypeShort;
-    const bool is_tx_toggle =
-        input_event->type == InputTypeLong && input_event->key == InputKeyOk;
+    const bool is_long_action = input_event->type == InputTypeLong &&
+                                (input_event->key == InputKeyOk ||
+                                 input_event->key == InputKeyLeft);
 
-    if(is_short_press || is_tx_toggle) {
+    if(is_short_press || is_long_action) {
         furi_message_queue_put(app->event_queue, input_event, 0);
     }
 }
