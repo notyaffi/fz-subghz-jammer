@@ -1095,7 +1095,8 @@ static void jammer_draw_action_chip(
     int32_t y,
     size_t width,
     const char* label,
-    JammerActionIcon icon) {
+    JammerActionIcon icon,
+    bool hold_action) {
     const size_t height = 12U;
     const int32_t icon_x = x + 5;
     const int32_t icon_y = y + 2;
@@ -1110,6 +1111,9 @@ static void jammer_draw_action_chip(
     elements_slightly_rounded_frame(canvas, x, y, width, height);
 
     jammer_draw_action_icon(canvas, icon, icon_x, icon_y);
+    if(hold_action) {
+        canvas_draw_line(canvas, icon_x + 1, y + 10, icon_x + 6, y + 10);
+    }
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str_aligned(canvas, text_center, y + 2, AlignCenter, AlignTop, label);
 }
@@ -1121,8 +1125,9 @@ static void jammer_draw_config_footer(Canvas* canvas, bool authors_item) {
         51,
         52U,
         authors_item ? "OPEN" : "ITEM",
-        authors_item ? JammerActionIconOk : JammerActionIconUpDown);
-    jammer_draw_action_chip(canvas, 68, 51, 52U, "EXIT", JammerActionIconBack);
+        authors_item ? JammerActionIconOk : JammerActionIconUpDown,
+        false);
+    jammer_draw_action_chip(canvas, 68, 51, 52U, "EXIT", JammerActionIconBack, false);
 }
 
 static void jammer_draw_frequency(
@@ -1248,10 +1253,10 @@ static void jammer_draw_config(
 
     if(config_ui->saved_visible) {
         canvas_set_color(canvas, ColorBlack);
-        canvas_draw_rbox(canvas, 76, 0, 33, 10, 2);
+        canvas_draw_rbox(canvas, 47, 0, 34, 10, 2);
         canvas_set_color(canvas, ColorWhite);
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str_aligned(canvas, 92, 1, AlignCenter, AlignTop, "SAVED");
+        canvas_draw_str_aligned(canvas, 64, 1, AlignCenter, AlignTop, "SAVED");
         canvas_set_color(canvas, ColorBlack);
     }
 
@@ -1276,8 +1281,7 @@ static void jammer_draw_authors(Canvas* canvas) {
     canvas_draw_rframe(canvas, 6, 13, 116, 34, 3);
     canvas_draw_str_aligned(canvas, 64, 18, AlignCenter, AlignTop, "@notyaffi");
     canvas_draw_str_aligned(canvas, 64, 33, AlignCenter, AlignTop, "@RocketGod-git");
-    jammer_draw_action_chip(canvas, 8, 51, 52U, "RETURN", JammerActionIconOk);
-    jammer_draw_action_chip(canvas, 68, 51, 52U, "RETURN", JammerActionIconBack);
+    jammer_draw_action_chip(canvas, 36, 51, 56U, "BACK", JammerActionIconBack, false);
 }
 
 static void jammer_draw_config_save_error(Canvas* canvas) {
@@ -1287,8 +1291,8 @@ static void jammer_draw_config_save_error(Canvas* canvas) {
     canvas_draw_str_aligned(canvas, 64, 19, AlignCenter, AlignTop, "SAVE FAILED");
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str_aligned(canvas, 64, 34, AlignCenter, AlignTop, "SETTING NOT CHANGED");
-    jammer_draw_action_chip(canvas, 8, 51, 52U, "RETURN", JammerActionIconOk);
-    jammer_draw_action_chip(canvas, 68, 51, 52U, "RETURN", JammerActionIconBack);
+    jammer_draw_action_chip(canvas, 8, 51, 52U, "RETURN", JammerActionIconOk, false);
+    jammer_draw_action_chip(canvas, 68, 51, 52U, "RETURN", JammerActionIconBack, false);
 }
 
 static void jammer_draw_callback(Canvas* canvas, void* context) {
@@ -1335,9 +1339,9 @@ static void jammer_draw_callback(Canvas* canvas, void* context) {
         canvas_set_font(canvas, FontSecondary);
         canvas_draw_str_aligned(canvas, 64, 13, AlignCenter, AlignTop, "LONG TX MAY DAMAGE");
         canvas_draw_str_aligned(canvas, 64, 23, AlignCenter, AlignTop, "INTERNAL RADIO");
-        jammer_draw_action_chip(canvas, 26, 34, 76U, "HOLD RETRY", JammerActionIconOk);
-        jammer_draw_action_chip(canvas, 4, 51, 58U, "USE INT", JammerActionIconOk);
-        jammer_draw_action_chip(canvas, 66, 51, 58U, "EXIT", JammerActionIconBack);
+        jammer_draw_action_chip(canvas, 26, 34, 76U, "RETRY", JammerActionIconOk, true);
+        jammer_draw_action_chip(canvas, 4, 51, 58U, "USE INT", JammerActionIconOk, false);
+        jammer_draw_action_chip(canvas, 66, 51, 58U, "EXIT", JammerActionIconBack, false);
         return;
     }
 
@@ -1390,22 +1394,20 @@ static void jammer_draw_callback(Canvas* canvas, void* context) {
         canvas_set_font(canvas, FontSecondary);
         canvas_draw_str_aligned(
             canvas, 64, 34, AlignCenter, AlignTop, jammer_ui_errors[error]);
-        canvas_draw_str_aligned(canvas, 64, 43, AlignCenter, AlignTop, "HOLD");
-        jammer_draw_action_chip(canvas, 36, 51, 56U, "RETRY", JammerActionIconOk);
+        jammer_draw_action_chip(canvas, 36, 51, 56U, "RETRY", JammerActionIconOk, true);
     } else {
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str_aligned(canvas, 64, 33, AlignCenter, AlignTop, jamming_modes[mode]);
-        canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str_aligned(canvas, 64, 43, AlignCenter, AlignTop, "HOLD");
 
         if(state == JammerUiStateIdle) {
-            jammer_draw_action_chip(canvas, 8, 51, 52U, "START", JammerActionIconOk);
-            jammer_draw_action_chip(canvas, 68, 51, 52U, "CONFIG", JammerActionIconLeft);
+            jammer_draw_action_chip(canvas, 8, 51, 52U, "START", JammerActionIconOk, true);
+            jammer_draw_action_chip(
+                canvas, 68, 51, 52U, "CONFIG", JammerActionIconLeft, true);
         } else if(
             state == JammerUiStateTransmitting || state == JammerUiStateStarting) {
-            jammer_draw_action_chip(canvas, 36, 51, 56U, "PAUSE", JammerActionIconOk);
+            jammer_draw_action_chip(canvas, 36, 51, 56U, "PAUSE", JammerActionIconOk, true);
         } else {
-            jammer_draw_action_chip(canvas, 36, 51, 56U, "START", JammerActionIconOk);
+            jammer_draw_action_chip(canvas, 36, 51, 56U, "START", JammerActionIconOk, true);
         }
     }
 }
